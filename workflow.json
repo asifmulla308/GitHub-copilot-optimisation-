@@ -1,0 +1,176 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2019-05-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+
+    "triggers": {
+      "When_a_new_email_arrives": {
+        "type": "ApiConnection",
+        "recurrence": {
+          "frequency": "Minute",
+          "interval": 1
+        },
+        "inputs": {
+          "host": {
+            "connection": {
+              "name": "@parameters('$connections')['office365']['connectionId']"
+            }
+          },
+          "method": "get",
+          "path": "/v3/Mail/OnNewEmail",
+          "queries": {
+            "folderPath": "Inbox",
+            "includeAttachments": true,
+            "fetchOnlyWithAttachment": false
+          }
+        }
+      }
+    },
+
+    "actions": {
+
+      "Initialize_RequestId": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "requestId",
+              "type": "string",
+              "value": "@guid()"
+            }
+          ]
+        }
+      },
+
+      "Initialize_MessageId": {
+        "type": "InitializeVariable",
+        "runAfter": {
+          "Initialize_RequestId": [
+            "Succeeded"
+          ]
+        },
+        "inputs": {
+          "variables": [
+            {
+              "name": "messageId",
+              "type": "string",
+              "value": "@triggerBody()?['id']"
+            }
+          ]
+        }
+      },
+
+      "Create_Email_Blob_Path": {
+        "type": "Compose",
+        "runAfter": {
+          "Initialize_MessageId": [
+            "Succeeded"
+          ]
+        },
+        "inputs": "@concat('emails/', formatDateTime(utcNow(),'yyyy/MM/dd/'), variables('requestId'), '/email.json')"
+      },
+
+      "Create_Email_Json": {
+        "type": "Compose",
+        "runAfter": {
+          "Create_Email_Blob_Path": [
+            "Succeeded"
+          ]
+        },
+        "inputs": {
+          "requestId": "@variables('requestId')",
+          "messageId": "@variables('messageId')",
+          "internetMessageId": "@triggerBody()?['internetMessageId']",
+          "sender": "@triggerBody()?['from']?['emailAddress']?['address']",
+          "senderName": "@triggerBody()?['from']?['emailAddress']?['name']",
+          "subject": "@triggerBody()?['subject']",
+          "receivedDateTime": "@triggerBody()?['receivedDateTime']",
+          "hasAttachments": "@triggerBody()?['hasAttachments']",
+          "importance": "@triggerBody()?['importance']",
+          "body": "@triggerBody()?['body']"
+        }
+      },
+
+      "Store_Email_In_Blob": {
+        "type": "ApiConnection",
+        "runAfter": {
+          "Create_Email_Json": [
+            "Succeeded"
+          ]
+        },
+        "inputs": {
+          "host": {
+            "connection": {
+              "name": "@parameters('$connections')['azureblob']['connectionId']"
+            }
+          },
+          "method": "post",
+          "body": "@json(string(outputs('Create_Email_Json')))",
+          "path": "/v2/datasets/@{encodeURIComponent(parameters('storageAccountName'))}/files",
+          "queries": {
+            "folderPath": "@concat('/emails/',formatDateTime(utcNow(),'yyyy/MM/dd/'),variables('requestId'))",
+            "name": "email.json",
+            "queryParametersSingleEncoded": true
+          }
+        }
+      },
+
+      "Create_Queue_Message": {
+        "type": "Compose",
+        "runAfter": {
+          "Store_Email_In_Blob": [
+            "Succeeded"
+          ]
+        },
+        "inputs": {
+          "requestId": "@variables('requestId')",
+          "messageId": "@variables('messageId')",
+          "blobPath": "@outputs('Create_Email_Blob_Path')",
+          "receivedDateTime": "@triggerBody()?['receivedDateTime']",
+          "subject": "@triggerBody()?['subject']",
+          "sender": "@triggerBody()?['from']?['emailAddress']?['address']",
+          "hasAttachments": "@triggerBody()?['hasAttachments']",
+          "eventType": "NewEmail"
+        }
+      },
+
+      "Send_Message_To_Queue": {
+        "type": "ApiConnection",
+        "runAfter": {
+          "Create_Queue_Message": [
+            "Succeeded"
+          ]
+        },
+        "inputs": {
+          "host": {
+            "connection": {
+              "name": "@parameters('$connections')['azurequeues']['connectionId']"
+            }
+          },
+          "method": "post",
+          "body": "@base64(string(outputs('Create_Queue_Message')))",
+          "path": "/@{encodeURIComponent(parameters('queueName'))}/messages"
+        }
+      }
+
+    },
+
+    "outputs": {}
+  },
+
+  "parameters": {
+    "storageAccountName": {
+      "type": "String",
+      "defaultValue": "YOUR_STORAGE_ACCOUNT"
+    },
+    "queueName": {
+      "type": "String",
+      "defaultValue": "email-processing"
+    },
+
+    "$connections": {
+      "type": "Object",
+      "defaultValue": {}
+    }
+  }
+}
